@@ -8,10 +8,11 @@ import random
 import numpy as np
 import numpy
 import networks
-from my_args import  args
+from my_args import args
 
-from scipy.misc import imread, imsave
-from AverageMeter import  *
+# from scipy.misc import imread, imsave
+import imageio
+from AverageMeter import *
 
 torch.backends.cudnn.benchmark = True # to speed up the
 
@@ -22,7 +23,6 @@ MB_Other_RESULT = "./MiddleBurySet/other-result-author/"
 MB_Other_GT = "./MiddleBurySet/other-gt-interp/"
 if not os.path.exists(MB_Other_RESULT):
     os.mkdir(MB_Other_RESULT)
-
 
 
 model = networks.__dict__[args.netName](channel=args.channels,
@@ -83,14 +83,13 @@ if DO_MiddleBurryOther:
         arguments_strOut = os.path.join(gen_dir, dir, "frame10i11.png")
         gt_path = os.path.join(MB_Other_GT, dir, "frame10i11.png")
 
-        X0 =  torch.from_numpy( np.transpose(imread(arguments_strFirst) , (2,0,1)).astype("float32")/ 255.0).type(dtype)
-        X1 =  torch.from_numpy( np.transpose(imread(arguments_strSecond) , (2,0,1)).astype("float32")/ 255.0).type(dtype)
-
+        X0 = torch.from_numpy(np.transpose(imageio.imread(arguments_strFirst), (2, 0, 1)).astype("float32") / 255.0).type(dtype)
+        X1 = torch.from_numpy(np.transpose(imageio.imread(arguments_strSecond), (2, 0, 1)).astype("float32") / 255.0).type(dtype)
 
         y_ = torch.FloatTensor()
 
-        assert (X0.size(1) == X1.size(1))
-        assert (X0.size(2) == X1.size(2))
+        # assert (X0.size(1) == X1.size(1))
+        # assert (X0.size(2) == X1.size(2))
 
         intWidth = X0.size(2)
         intHeight = X0.size(1)
@@ -128,7 +127,10 @@ if DO_MiddleBurryOther:
             X0 = X0.cuda()
             X1 = X1.cuda()
         proc_end = time.time()
-        y_s,offset,filter = model(torch.stack((X0, X1),dim = 0))
+
+        
+        tmp_a = torch.stack((X0, X1),dim = 0)
+        y_s,offset,filter = model(tmp_a)
         y_ = y_s[save_which]
 
         proc_timer.update(time.time() -proc_end)
@@ -159,11 +161,11 @@ if DO_MiddleBurryOther:
         X1 = np.transpose(255.0 * X1.clip(0,1.0)[0, :, intPaddingTop:intPaddingTop+intHeight, intPaddingLeft: intPaddingLeft+intWidth], (1, 2, 0))
 
 
-        imsave(arguments_strOut, np.round(y_).astype(numpy.uint8))
+        imageio.imwrite(arguments_strOut, np.round(y_).astype(numpy.uint8))
 
 
-        rec_rgb =  imread(arguments_strOut)
-        gt_rgb = imread(gt_path)
+        rec_rgb =  imageio.imread(arguments_strOut)
+        gt_rgb = imageio.imread(gt_path)
 
         diff_rgb = 128.0 + rec_rgb - gt_rgb
         avg_interp_error_abs = np.mean(np.abs(diff_rgb - 128.0))

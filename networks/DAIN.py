@@ -13,6 +13,7 @@ import Resblock
 import MegaDepth
 import time
 
+
 class DAIN(torch.nn.Module):
     def __init__(self,
                  channel = 3,
@@ -36,7 +37,7 @@ class DAIN(torch.nn.Module):
         self.ctxNet = S2D_models.__dict__['S2DF_3dense']()
         self.ctx_ch = 3 * 64 + 3
 
-        self.rectifyNet = Resblock.__dict__['MultipleBasicBlock_4'](3 + 3 + 3 +2*1+ 2*2 +16*2+ 2 * self.ctx_ch,128)
+        self.rectifyNet = Resblock.__dict__['MultipleBasicBlock_4'](3 + 3 + 3 + 2*1 + 2*2 + 16*2 + 2 * self.ctx_ch, 128)
 
         self._initialize_weights()
         
@@ -205,7 +206,7 @@ class DAIN(torch.nn.Module):
         temp = model(input)  # this is a single direction motion results, but not a bidirectional one
 
         temps = [self.div_flow * temp * time_offset for time_offset in time_offsets]# single direction to bidirection should haven it.
-        temps = [nn.Upsample(scale_factor=4, mode='bilinear')(temp)  for temp in temps]# nearest interpolation won't be better i think
+        temps = [nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True)(temp)  for temp in temps]# nearest interpolation won't be better i think
         return temps
 
     '''keep this function'''
@@ -371,7 +372,7 @@ class DAIN(torch.nn.Module):
 
         layers = nn.Sequential(*[
 
-            nn.Upsample(scale_factor=unpooling_factor, mode='bilinear'),
+            nn.Upsample(scale_factor=unpooling_factor, mode='bilinear', align_corners=True),
 
             nn.Conv2d(input_filter,output_filter,kernel_size,1, padding),
 

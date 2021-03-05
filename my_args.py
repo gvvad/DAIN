@@ -3,16 +3,16 @@ import datetime
 import argparse
 import numpy
 import networks
-import  torch
-modelnames =  networks.__all__
+import torch
+modelnames = networks.__all__
 # import datasets
 datasetNames = ('Vimeo_90K_interp') #datasets.__all__
 
 parser = argparse.ArgumentParser(description='DAIN')
 
-parser.add_argument('--debug',action = 'store_true', help='Enable debug mode')
+parser.add_argument('--debug', action='store_true', help='Enable debug mode')
 parser.add_argument('--netName', type=str, default='DAIN',
-                    choices = modelnames,help = 'model architecture: ' +
+                    choices = modelnames, help = 'model architecture: ' +
                         ' | '.join(modelnames) +
                         ' (default: DAIN)')
 
@@ -99,7 +99,6 @@ else:
                 shutil.copy(save_path+"/log.txt", save_path+"/log.txt.bk"+str(m))
                 shutil.copy(save_path+"/args.txt", save_path+"/args.txt.bk"+str(m))
                 break
-
 
 
 parser.add_argument('--save_path',default=save_path,help = 'the output dir of weights')
