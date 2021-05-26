@@ -128,7 +128,7 @@ if DO_MiddleBurryOther:
             X1 = X1.cuda()
         proc_end = time.time()
 
-        
+
         tmp_a = torch.stack((X0, X1),dim = 0)
         y_s,offset,filter = model(tmp_a)
         y_ = y_s[save_which]
@@ -150,14 +150,12 @@ if DO_MiddleBurryOther:
             filter = [filter_i.data.numpy() for filter_i in filter]
             X1 = X1.data.numpy()
 
-
-
         X0 = np.transpose(255.0 * X0.clip(0,1.0)[0, :, intPaddingTop:intPaddingTop+intHeight, intPaddingLeft: intPaddingLeft+intWidth], (1, 2, 0))
         y_ = np.transpose(255.0 * y_.clip(0,1.0)[0, :, intPaddingTop:intPaddingTop+intHeight, intPaddingLeft: intPaddingLeft+intWidth], (1, 2, 0))
         offset = [np.transpose(offset_i[0, :, intPaddingTop:intPaddingTop+intHeight, intPaddingLeft: intPaddingLeft+intWidth], (1, 2, 0)) for offset_i in offset]
         filter = [np.transpose(
             filter_i[0, :, intPaddingTop:intPaddingTop + intHeight, intPaddingLeft: intPaddingLeft + intWidth],
-            (1, 2, 0)) for filter_i in filter]  if filter is not None else None
+            (1, 2, 0)) for filter_i in filter] if filter is not None else None
         X1 = np.transpose(255.0 * X1.clip(0,1.0)[0, :, intPaddingTop:intPaddingTop+intHeight, intPaddingLeft: intPaddingLeft+intWidth], (1, 2, 0))
 
 
@@ -180,4 +178,3 @@ if DO_MiddleBurryOther:
         print("interpolation error / PSNR : " + str(round(avg_interp_error_abs,4)) + " / " + str(round(psnr,4)))
         metrics = "The average interpolation error / PSNR for all images are : " + str(round(interp_error.avg, 4))
         print(metrics)
-
