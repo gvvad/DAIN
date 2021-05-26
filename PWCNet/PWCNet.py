@@ -149,7 +149,7 @@ class PWCDCNet(nn.Module):
         yy = torch.arange(0, H_MAX).view(-1, 1).cuda().repeat(1, W_MAX)
         xx = xx.view(1, 1, H_MAX, W_MAX).repeat(B_MAX, 1, 1, 1)
         yy = yy.view(1, 1, H_MAX, W_MAX).repeat(B_MAX, 1, 1, 1)
-        grid = torch.cat((xx, yy), 1).float()
+        grid = torch.cat((xx, yy), 1).type(torch.get_default_dtype())
 
         ## for saving time on allocating a grid in forward
         self.W_MAX = W_MAX
@@ -187,7 +187,8 @@ class PWCDCNet(nn.Module):
         vgrid = vgrid.permute(0, 2, 3, 1)
         output = nn.functional.grid_sample(x, vgrid, align_corners=True)
         # mask = torch.autograd.Variable(torch.ones(x.size())).cuda()
-        mask = torch.autograd.Variable(torch.cuda.FloatTensor().resize_(x.size()).zero_() + 1, requires_grad=False)
+        # mask = torch.autograd.Variable(torch.cuda.FloatTensor().resize_(x.size()).zero_() + 1, requires_grad=False)
+        mask = torch.ones(x.size()).type(torch.get_default_dtype()).cuda()
         mask = nn.functional.grid_sample(mask, vgrid, align_corners=True)
 
         # if W==128:
@@ -533,7 +534,7 @@ class PWCDCNet(nn.Module):
 
 
 def pwc_dc_net(path=None):
-    model = PWCDCNet()
+    model = PWCDCNet().type(torch.get_default_dtype())
     if path is not None:
         data = torch.load(path)
         if 'state_dict' in data.keys():

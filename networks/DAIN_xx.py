@@ -1,211 +1,198 @@
 import torch
 import torch.nn as nn
-from my_package.FilterInterpolation import  FilterInterpolationModule
-from my_package.FlowProjection import  FlowProjectionModule #,FlowFillholeModule
+from my_package.FilterInterpolation import FilterInterpolationModule
+from my_package.FlowProjection import FlowProjectionModule #,FlowFillholeModule
 from my_package.DepthFlowProjection import DepthFlowProjectionModule
 
-from Stack import Stack
+from torch.nn.functional import interpolate
 
+from Stack import Stack
+import time
 import PWCNet
 import S2D_models
 import Resblock
 import MegaDepth
 # import time
+import numpy as np
+# import imageio
 
+class TimeStat:
+    def checkpoint(self):
+        self.time_point = time.time()
+    def getDelta(self) -> float:
+        return time.time() - self.time_point
+    def getDeltaInSeconds(self):
+        return self.getDelta()
 
 class DAIN(torch.nn.Module):
-    def __init__(self,
-                 channel = 3,
-                 filter_size = 4,
-                 timestep=0.5,
-                 training=True):
-
+    def __init__(self, frames=1, stat=False):
         # base class initialization
         super(DAIN, self).__init__()
         
-        self.filter_size = filter_size
-        self.training = training
-        self.timestep = timestep
-        assert (timestep == 0.5) # TODO: or else the WeigtedFlowProjection should also be revised... Really Tedious work.
-        self.numFrames =int(1.0/timestep) - 1
+        self.device = torch.device("cuda")
 
-        i=0
+        self.height = self.width = None
+        self.padding = None
+        self.padder = None
+        self.frame_a = None
+        
+        self.stat = stat
+        if self.stat:
+            self.timestat = TimeStat()
+
+        parts = frames + 1
+        delta = 1.0 / parts
+        self.time_offsets = [(i+1)*delta for i in range(parts-1)]
+
+        self.filter_size = 4
+
         self.initScaleNets_filter,self.initScaleNets_filter1,self.initScaleNets_filter2 = \
-            self.get_MonoNet5(channel if i == 0 else channel + filter_size * filter_size, filter_size * filter_size, "filter")
+            self.get_MonoNet5(3, self.filter_size * self.filter_size, "filter")
 
-        self.ctxNet = S2D_models.__dict__['S2DF_3dense']()
+        self.ctxNet = S2D_models.S2DF_3dense()
         self.ctx_ch = 3 * 64 + 3
 
-        self.rectifyNet = Resblock.__dict__['MultipleBasicBlock_4'](3 + 3 + 3 + 2*1 + 2*2 + 16*2 + 2 * self.ctx_ch, 128)
-
-        self._initialize_weights()
+        self.rectifyNet = Resblock.MultipleBasicBlock_4(3 + 3 + 3 + 2*1 + 2*2 + 16*2 + 2 * self.ctx_ch, 128)
         
-        if self.training:
-            self.flownets = PWCNet.__dict__['pwc_dc_net']("PWCNet/pwc_net.pth.tar")
-        else:
-            self.flownets = PWCNet.__dict__['pwc_dc_net']()
+        self.flownets = PWCNet.pwc_dc_net()
+        
         self.div_flow = 20.0
-
         #extract depth information
-        if self.training:
-            self.depthNet=MegaDepth.__dict__['HourGlass']("MegaDepth/checkpoints/test_local/best_generalization_net_G.pth")
+        self.depthNet=MegaDepth.HourGlass()#.half()
+
+    def statCheckpoint(self):
+        if self.stat:
+            self.timestat.checkpoint()
+    def statPrintMessage(self, msg:str, ms=False):
+        if self.stat:
+            print(msg.format(self.timestat.getDelta() if ms==True else self.timestat.getDeltaInSeconds()))
+
+    @staticmethod
+    def getPaddings(value):
+        if value != ((value >> 7) << 7):
+            buf = (((value >> 7) + 1) << 7)
+            a = int((buf - value)/2)
+            b = buf - value - a
+            return(a, b)
         else:
-            self.depthNet=MegaDepth.__dict__['HourGlass']()
+            return(32, 32)
+    
+    def getFrameFromRgb(self, frame_rgb) -> torch.tensor:
+        if isinstance(frame_rgb, np.ndarray):
+            return torch.from_numpy(
+                np.transpose(frame_rgb, (2, 0, 1)).astype(np.float32) / 255.0
+                ).type(torch.get_default_dtype()).to(self.device)
 
-        return
-
-    def _initialize_weights(self):
-        count = 0
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                # n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-                # m.weight.data.normal_(0, math.sqrt(2. / n))
-                # print(m)
-                count+=1
-                # print(count)
-                # weight_init.xavier_uniform(m.weight.data)
-                nn.init.xavier_uniform_(m.weight.data)
-                # weight_init.kaiming_uniform(m.weight.data, a = 0, mode='fan_in')
-                if m.bias is not None:
-                    m.bias.data.zero_()
-            elif isinstance(m, nn.BatchNorm2d):
-                m.weight.data.fill_(1)
-                m.bias.data.zero_()
-            elif isinstance(m, nn.Linear):
-                m.weight.data.normal_(0, 0.01)
-                m.bias.data.zero_()
-            # else:
-            #     print(m)
-
-
-    def forward(self, input):
-
-        """
-        Parameters
-        ----------
-        input: shape (3, batch, 3, width, height)
-        -----------
-        """
-        losses = []
-        offsets= []
-        filters = []
-        occlusions = []
-
-        # device = torch.cuda.current_device()
-        # s1 = torch.cuda.Stream(device=device, priority=5)
-        # s2 = torch.cuda.Stream(device=device, priority=10) #PWC-Net is slow, need to have higher priority
-        s1 = torch.cuda.current_stream()
-        s2 = torch.cuda.current_stream()
-
-        '''
-            STEP 1: sequeeze the input 
-        '''
-        if self.training == True:
-            assert input.size(0) == 3
-            input_0,input_1,input_2 = torch.squeeze(input,dim=0)
-        else:
-            assert input.size(0) ==2
-            input_0,input_2 = torch.squeeze(input,dim=0)
-
-
-        #prepare the input data of current scale
-        cur_input_0 = input_0
-        if self.training == True:
-            cur_input_1 = input_1
-        cur_input_2 =  input_2
-
-        del input, input_0, input_2
-        '''
-            STEP 3.2: concatenating the inputs.
-        '''
-        cur_offset_input = torch.cat((cur_input_0, cur_input_2), dim=1)
-        cur_filter_input = cur_offset_input # torch.cat((cur_input_0, cur_input_2), dim=1)
-
-        '''
-            STEP 3.3: perform the estimation by the Three subpath Network 
-        '''
-        time_offsets = [ kk * self.timestep for kk in range(1, 1+self.numFrames,1)]
-
-        with torch.cuda.stream(s1):
-            bufa = torch.cat((cur_filter_input[:, :3, ...], cur_filter_input[:, 3:, ...]), dim=0)
-            temp  = self.depthNet(bufa)
-            log_depth = [temp[:cur_filter_input.size(0)], temp[cur_filter_input.size(0):]]
-
-            cur_ctx_output = [
-                torch.cat((self.ctxNet(cur_filter_input[:, :3, ...]),
-                        log_depth[0].detach()), dim=1),
-                    torch.cat((self.ctxNet(cur_filter_input[:, 3:, ...]),
-                    log_depth[1].detach()), dim=1)
-                    ]
-            temp = self.forward_singlePath(self.initScaleNets_filter, cur_filter_input, 'filter')
-            cur_filter_output = [self.forward_singlePath(self.initScaleNets_filter1, temp, name=None),
-                                self.forward_singlePath(self.initScaleNets_filter2, temp, name=None)]
-            
-            depth_inv = [1e-6 + 1 / torch.exp(d) for d in log_depth]
-            del log_depth, temp
-
-        with torch.cuda.stream(s2):
-            for _ in range(1):
-                cur_offset_outputs = [
-                        self.forward_flownets(self.flownets,
-                                                cur_offset_input,
-                                                time_offsets=time_offsets ),
-                        self.forward_flownets(self.flownets,
-                                                torch.cat((cur_offset_input[:, 3:, ...],
-                                                            cur_offset_input[:, 0:3, ...]),
-                                                        dim=1),
-                                                time_offsets=time_offsets[::-1])]
-            
+    def frameToRgb(self, frame:torch.tensor):
+        frame.squeeze_().clip_(0.0, 1.0).mul_(255)
+        t_res_1 = frame[:, self.padding[2]:self.padding[2]+self.height,
+                           self.padding[0]:self.padding[0]+self.width].permute(1, 2, 0).type(torch.uint8)
         
-        torch.cuda.synchronize() #synchronize s1 and s2
-        del cur_offset_input, cur_filter_input
+        return np.array(t_res_1.cpu(), dtype=np.uint8)
+        # return t_res_1
 
-        cur_offset_outputs = [
-            self.FlowProject(cur_offset_outputs[0],depth_inv[0]),
-            self.FlowProject(cur_offset_outputs[1],depth_inv[1])
+    @staticmethod
+    def resizeFrame(frame, height, width) -> torch.Tensor:
+        buf = frame.clone().squeeze_(0)
+        buf = interpolate(buf, size=int(width), mode="nearest")
+        buf = buf.permute(0, 2, 1)
+        buf = interpolate(buf, size=int(height), mode="nearest")
+        buf = buf.permute(0, 2, 1)
+        buf.clamp_(0.0, 1.0)
+        return buf
+
+    def processRgb(self, frame_rgb):
+        self.statCheckpoint()
+        with torch.no_grad():
+            if self.padder == None:
+                self.height = frame_rgb.shape[0]
+                self.width = frame_rgb.shape[1]
+                self.padding = (self.getPaddings(self.width) + self.getPaddings(self.height))
+                self.padder = torch.nn.ReplicationPad2d(self.padding)
+            
+            self.statPrintMessage("frame [padding begin]: {:.2f}")
+            frame = self.padder(self.getFrameFromRgb(frame_rgb).unsqueeze(0))
+            self.statPrintMessage("frame [padding done]: {:.2f}")
+            
+            if self.frame_a is not None:
+                res_frame = self.forward(frame)
+                self.statPrintMessage("frame [rgb begin]: {:.2f}")
+                rgb = self.frameToRgb(res_frame)
+                self.statPrintMessage("frame [rgb done]: {:.2f}")
+                return rgb
+            
+            self.frame_a = frame
+            del frame
+            
+            self.frame_a_depth = self.depthNet(self.frame_a)
+            self.frame_a_depth_inv = (1e-6 + 1 / torch.exp(self.frame_a_depth))
+            return None
+
+    def forward(self, frame_b):
+        self.statPrintMessage("frame [netbegin]: {:.2f}")
+        frame_b_depth = self.depthNet(frame_b)
+        
+        self.statPrintMessage("frame [depth]: {:.2f}")
+        frame_b_depth_inv = 1e-6 + 1 / torch.exp(frame_b_depth)
+
+        filter0_ab = self.forward_singlePath(self.initScaleNets_filter, torch.cat((self.frame_a, frame_b), dim=1), 'filter')
+        cur_filter_output = [
+            self.forward_singlePath(self.initScaleNets_filter1, filter0_ab, name=None).float(),
+            self.forward_singlePath(self.initScaleNets_filter2, filter0_ab, name=None).float()
+            ]
+        del filter0_ab
+        self.statPrintMessage("frame [filters]: {:.2f}")
+
+        flownets_ab = self.forward_flownets(self.flownets,
+                                            torch.cat((self.frame_a, frame_b), dim=1),
+                                            time_offsets=self.time_offsets)
+        flownets_ba = self.forward_flownets(self.flownets,
+                                            torch.cat((frame_b, self.frame_a), dim=1),
+                                            time_offsets=self.time_offsets[::-1])
+        self.statPrintMessage("frame [flownets]: {:.2f}")
+        
+        
+        cur_offset_output = [ # return float32
+            self.FlowProject(flownets_ab, self.frame_a_depth_inv)[0],
+            self.FlowProject(flownets_ba, frame_b_depth_inv)[0]
         ]
-        del depth_inv
-        '''
-            STEP 3.4: perform the frame interpolation process 
-        '''
-        cur_offset_output = [cur_offset_outputs[0][0], cur_offset_outputs[1][0]]
-        ctx0,ctx2 = self.FilterInterpolate_ctx(cur_ctx_output[0],cur_ctx_output[1],
-                                                   cur_offset_output,cur_filter_output)
-        del cur_ctx_output
-
-        cur_output,ref0,ref2 = self.FilterInterpolate(cur_input_0, cur_input_2,cur_offset_output,cur_filter_output,self.filter_size**2)
-        del cur_input_0, cur_input_2
+        del flownets_ab, flownets_ba
+        self.statPrintMessage("frame [flowProjects]: {:.2f}")
+        
+        cur_output, ref0, ref2 = self.FilterInterpolate(self.frame_a.float(), frame_b.float(),
+                                                        [cur_offset_output[0], cur_offset_output[1]],
+                                                        cur_filter_output, self.filter_size**2)
+        
+        self.statPrintMessage("frame [interpolate]: {:.2f}")
+        
+        # =============RECTIFYING========
+        frame_a_ctx = self.ctxNet(self.frame_a)
+        frame_b_ctx = self.ctxNet(frame_b)
+        ctx0, ctx2 = self.FilterInterpolate_ctx(torch.cat((frame_a_ctx, self.frame_a_depth), dim=1).float(),
+                                                torch.cat((frame_b_ctx, frame_b_depth), dim=1).float(),
+                                                cur_offset_output,
+                                                [cur_filter_output[0].float(), cur_filter_output[1].float()])
+        del frame_a_ctx, frame_b_ctx
 
         rectify_input = torch.cat((cur_output, ref0, ref2,
-                                    cur_offset_output[0], cur_offset_output[1],
-                                    cur_filter_output[0], cur_filter_output[1],
-                                    ctx0, ctx2), dim =1)
-        del ref0, ref2, ctx0, ctx2
-
-        cur_output_rectified = self.rectifyNet(rectify_input) + cur_output
-
-        '''
-            STEP 3.5: for training phase, we collect the variables to be penalized.
-        '''
-        if self.training == True:
-                losses +=[cur_output - cur_input_1]
-                losses += [cur_output_rectified - cur_input_1]                
-                offsets +=[cur_offset_output]
-                filters += [cur_filter_output]
-        '''
-            STEP 4: return the results
-        '''
-        if self.training == True:
-            # if in the training phase, we output the losses to be minimized.
-            # return losses, loss_occlusion
-            return losses, offsets,filters,occlusions
-        else:
-            cur_outputs = [cur_output,cur_output_rectified]
-            return cur_outputs,cur_offset_output,cur_filter_output
+                                cur_offset_output[0], cur_offset_output[1],
+                                cur_filter_output[0], cur_filter_output[1],
+                                ctx0, ctx2), dim=1)
+        
+        del cur_filter_output, cur_offset_output, ctx0, ctx2, ref0, ref2
+        
+        result = self.rectifyNet(rectify_input.type(torch.get_default_dtype())) + cur_output.type(torch.get_default_dtype())
+        del rectify_input
+        self.statPrintMessage("frame [rectify]: {:.2f}")
+        
+        self.frame_a = frame_b
+        self.frame_a_depth = frame_b_depth
+        self.frame_a_depth_inv = frame_b_depth_inv
+        self.statPrintMessage("frame [net end]: {:.2f}")
+        return result
 
     def forward_flownets(self, model, input, time_offsets = None):
-
-        if time_offsets == None :
+        if time_offsets == None:
             time_offsets = [0.5]
         elif type(time_offsets) == float:
             time_offsets = [time_offsets]
@@ -302,9 +289,9 @@ class DAIN(torch.nn.Module):
     @staticmethod
     def FlowProject(inputs, depth = None):
         if depth is not None:
-            outputs = [DepthFlowProjectionModule(input.requires_grad)(input,depth) for input in inputs]
+            outputs = [DepthFlowProjectionModule(input.requires_grad)(input.float(), depth.float()) for input in inputs]
         else:
-            outputs = [ FlowProjectionModule(input.requires_grad)(input) for input in inputs]
+            outputs = [FlowProjectionModule(input.requires_grad)(input.float()) for input in inputs]
         return outputs
 
 
